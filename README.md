@@ -29,17 +29,15 @@ MeScreen puts your camera in a small, draggable overlay above other windows. It 
 
 ## Download and run
 
-[**Download MeScreen v1.0.0 for Apple Silicon →**](https://github.com/alexcybernetic/mescreen/releases/download/v1.0.0/MeScreen-v1.0.0-macOS-arm64.zip)
+[**Download MeScreen v1.1.0 for Apple Silicon →**](https://github.com/alexcybernetic/mescreen/releases/download/v1.1.0/MeScreen-v1.1.0-macOS-arm64.zip)
 
 Requires **macOS 14 or newer**. Unzip the download, move `MeScreen.app` to **Applications**, and allow camera access when asked.
 
-The v1.0.0 download is the original circular release. The customization controls described here are currently available when building the latest source.
-
-The binary is accompanied by a [SHA-256 checksum](https://github.com/alexcybernetic/mescreen/releases/download/v1.0.0/MeScreen-v1.0.0-macOS-arm64.zip.sha256). Download both files into the same directory and compare their hashes:
+The binary is accompanied by a [SHA-256 checksum](https://github.com/alexcybernetic/mescreen/releases/download/v1.1.0/MeScreen-v1.1.0-macOS-arm64.zip.sha256). Download both files into the same directory and compare their hashes:
 
 ```sh
-actual="$(shasum -a 256 MeScreen-v1.0.0-macOS-arm64.zip | awk '{print $1}')"
-expected="$(awk '{print $1}' MeScreen-v1.0.0-macOS-arm64.zip.sha256)"
+actual="$(shasum -a 256 MeScreen-v1.1.0-macOS-arm64.zip | awk '{print $1}')"
+expected="$(awk '{print $1}' MeScreen-v1.1.0-macOS-arm64.zip.sha256)"
 [[ "$actual" == "$expected" ]] && echo "Checksum OK" || echo "Checksum mismatch"
 ```
 
