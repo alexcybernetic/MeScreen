@@ -8,7 +8,7 @@
 
 ![MeScreen camera overlay and menu](Media/MeScreenScreenshot.png)
 
-MeScreen puts your camera in a small, draggable circle above other windows. It lives in the menu bar and stays out of the Dock.
+MeScreen puts your camera in a small, draggable overlay above other windows. It lives in the menu bar and stays out of the Dock.
 
 ## Useful for
 
@@ -19,9 +19,12 @@ MeScreen puts your camera in a small, draggable circle above other windows. It l
 
 ## Highlights
 
-- Always-on-top circular camera overlay
-- Drag it anywhere and choose from three sizes
+- Five shapes: circle, squircle, rounded square, square, and octagon
+- Custom border, shadow, reflection, camera flips, and 90° rotation
+- Optional single-line label with configurable text and pill styling
+- Drag it anywhere, choose from three sizes, or select a launch corner
 - Switch between built-in and external cameras
+- Global ⇧⌥⌘M shortcut to hide or show the overlay
 - Works across Spaces and full-screen apps
 
 ## Download and run
@@ -29,6 +32,8 @@ MeScreen puts your camera in a small, draggable circle above other windows. It l
 [**Download MeScreen v1.0.0 for Apple Silicon →**](https://github.com/alexcybernetic/mescreen/releases/download/v1.0.0/MeScreen-v1.0.0-macOS-arm64.zip)
 
 Requires **macOS 14 or newer**. Unzip the download, move `MeScreen.app` to **Applications**, and allow camera access when asked.
+
+The v1.0.0 download is the original circular release. The customization controls described here are currently available when building the latest source.
 
 The binary is accompanied by a [SHA-256 checksum](https://github.com/alexcybernetic/mescreen/releases/download/v1.0.0/MeScreen-v1.0.0-macOS-arm64.zip.sha256). Download both files into the same directory and compare their hashes:
 
@@ -49,7 +54,9 @@ The published build is ad-hoc signed and is not notarized. macOS therefore canno
 
 ## Use
 
-Drag the camera circle to move it. Use the menu-bar icon to change its size, switch cameras, view About, or quit.
+Drag the camera overlay to move it. Use the menu-bar icon to change its size, switch cameras, or open **Customize…** for appearance, label, position, and shortcut settings.
+
+Press **⇧⌥⌘M** to hide or show the overlay. Hiding it also stops the camera session; showing it starts the camera again.
 
 ## Build from source
 
@@ -68,7 +75,7 @@ Versioned archives and portable SHA-256 checksums are written to `Dist/` only wh
 
 ## Privacy
 
-MeScreen works locally. It has no analytics, network access, or recording feature—your camera feed is only displayed on screen.
+MeScreen works locally. It has no analytics, network access, or recording feature—your camera feed is only displayed on screen. Customization settings, including optional label text, are stored only in the app's local preferences.
 
 ## License
 

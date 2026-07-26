@@ -84,18 +84,21 @@ private actor ControlledSessionController: CaptureSessionControlling {
     }
 
     private var pendingStarts: [PendingStart] = []
+    private var stoppedSessionIDs: [ObjectIdentifier?] = []
 
     func discoverCameras() async -> [CameraDescriptor] {
         []
     }
 
     func start(preferredCameraID: String?) async -> CaptureSessionStartOutcome {
-        await withCheckedContinuation { continuation in
+        return await withCheckedContinuation { continuation in
             pendingStarts.append(PendingStart(continuation: continuation))
         }
     }
 
-    func stop(sessionIdentifier: ObjectIdentifier?) async {}
+    func stop(sessionIdentifier: ObjectIdentifier?) async {
+        stoppedSessionIDs.append(sessionIdentifier)
+    }
 
     func waitForPendingStartCount(_ expectedCount: Int) async {
         while pendingStarts.count < expectedCount {
@@ -107,6 +110,11 @@ private actor ControlledSessionController: CaptureSessionControlling {
         precondition(!pendingStarts.isEmpty, "No pending fake capture-session start")
         pendingStarts.removeFirst().continuation.resume(returning: outcome)
     }
+
+    func hasStopped(sessionIdentifier: ObjectIdentifier) -> Bool {
+        stoppedSessionIDs.contains { $0 == sessionIdentifier }
+    }
+
 }
 
 nonisolated final class CameraManagerStateTests: XCTestCase {
@@ -123,7 +131,7 @@ nonisolated final class CameraManagerStateTests: XCTestCase {
 
         XCTAssertEqual(manager.cameraState, .permissionDenied)
         XCTAssertNil(manager.currentCamera)
-        XCTAssertNil(manager.previewLayer)
+        XCTAssertNil(manager.captureSession)
         XCTAssertTrue(sessions.requestedCameraIDs.isEmpty)
         XCTAssertEqual(sessions.stoppedSessionIDs.count, 1)
     }
@@ -163,7 +171,7 @@ nonisolated final class CameraManagerStateTests: XCTestCase {
         XCTAssertEqual(manager.cameraState, .running)
         XCTAssertEqual(manager.currentCamera, camera)
         XCTAssertEqual(manager.availableCameras, [camera])
-        XCTAssertIdentical(manager.previewLayer?.session, snapshot.session)
+        XCTAssertIdentical(manager.captureSession, snapshot.session)
     }
 
     @MainActor
@@ -185,7 +193,7 @@ nonisolated final class CameraManagerStateTests: XCTestCase {
             .failed(CaptureSessionFailure.inputRejected.message)
         )
         XCTAssertNil(manager.currentCamera)
-        XCTAssertNil(manager.previewLayer)
+        XCTAssertNil(manager.captureSession)
         XCTAssertEqual(manager.availableCameras, [camera])
     }
 
@@ -214,7 +222,7 @@ nonisolated final class CameraManagerStateTests: XCTestCase {
         await waitUntil { manager.currentCamera == secondCamera }
 
         XCTAssertEqual(manager.cameraState, .running)
-        XCTAssertIdentical(manager.previewLayer?.session, secondSnapshot.session)
+        XCTAssertIdentical(manager.captureSession, secondSnapshot.session)
     }
 
     @MainActor
@@ -249,6 +257,61 @@ nonisolated final class CameraManagerStateTests: XCTestCase {
     }
 
     @MainActor
+    func testDeviceChangesDoNotRestartCameraAfterStop() async {
+        let camera = camera(id: "built-in", name: "Built-in Camera")
+        let snapshot = snapshot(camera: camera, cameras: [camera])
+        let sessions = FakeSessionController(outcomes: [.running(snapshot)])
+        let manager = makeManager(
+            authorization: FakeAuthorizationProvider(status: .authorized),
+            sessions: sessions
+        )
+
+        await manager.checkPermissions()
+        manager.stopCamera()
+        manager.handleDeviceChange(.connected)
+        await Task.yield()
+
+        XCTAssertEqual(sessions.requestedCameraIDs, [nil])
+        XCTAssertNil(manager.captureSession)
+        XCTAssertEqual(manager.cameraState, .idle)
+    }
+
+    @MainActor
+    func testStoppingDuringStartupStopsLateSession() async {
+        let camera = camera(id: "built-in", name: "Built-in Camera")
+        let lateSnapshot = snapshot(camera: camera, cameras: [camera])
+        let sessions = ControlledSessionController()
+        let manager = makeManager(
+            authorization: FakeAuthorizationProvider(status: .authorized),
+            sessions: sessions
+        )
+
+        let startup = Task { @MainActor in
+            await manager.checkPermissions()
+        }
+        await sessions.waitForPendingStartCount(1)
+        manager.stopCamera()
+        await sessions.resumeNextStart(with: .running(lateSnapshot))
+        await startup.value
+
+        for _ in 0..<1_000 {
+            if await sessions.hasStopped(
+                sessionIdentifier: lateSnapshot.sessionIdentifier
+            ) {
+                break
+            }
+            await Task.yield()
+        }
+
+        let stoppedLateSession = await sessions.hasStopped(
+            sessionIdentifier: lateSnapshot.sessionIdentifier
+        )
+        XCTAssertTrue(stoppedLateSession)
+        XCTAssertNil(manager.captureSession)
+        XCTAssertEqual(manager.cameraState, .idle)
+    }
+
+    @MainActor
     func testRuntimeErrorClearsOnlyMatchingActiveSession() async {
         let camera = camera(id: "built-in", name: "Built-in Camera")
         let activeSnapshot = snapshot(camera: camera, cameras: [camera])
@@ -274,7 +337,7 @@ nonisolated final class CameraManagerStateTests: XCTestCase {
 
         XCTAssertEqual(manager.cameraState, .failed("Camera disconnected"))
         XCTAssertNil(manager.currentCamera)
-        XCTAssertNil(manager.previewLayer)
+        XCTAssertNil(manager.captureSession)
         XCTAssertEqual(
             sessions.stoppedSessionIDs,
             [activeSnapshot.sessionIdentifier]

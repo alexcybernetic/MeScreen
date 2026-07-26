@@ -5,21 +5,47 @@
 //  Created by Alex on 19.03.26.
 //
 
+@preconcurrency import AVFoundation
 import SwiftUI
-import AVFoundation
+
+enum CameraImageTransform {
+    static func make(
+        isFlippedHorizontally: Bool,
+        isFlippedVertically: Bool,
+        rotation: OverlayRotation
+    ) -> CGAffineTransform {
+        CGAffineTransform(
+            scaleX: isFlippedHorizontally ? -1 : 1,
+            y: isFlippedVertically ? -1 : 1
+        )
+        .rotated(by: rotation.radians)
+    }
+}
 
 struct CameraPreviewView: NSViewRepresentable {
-    let previewLayer: AVCaptureVideoPreviewLayer
+    let session: AVCaptureSession
+    let isFlippedHorizontally: Bool
+    let isFlippedVertically: Bool
+    let rotation: OverlayRotation
 
     func makeNSView(context: Context) -> CameraPreviewNSView {
         let view = CameraPreviewNSView()
-        view.wantsLayer = true
-        view.install(previewLayer)
+        view.update(
+            session: session,
+            isFlippedHorizontally: isFlippedHorizontally,
+            isFlippedVertically: isFlippedVertically,
+            rotation: rotation
+        )
         return view
     }
 
     func updateNSView(_ nsView: CameraPreviewNSView, context: Context) {
-        nsView.install(previewLayer)
+        nsView.update(
+            session: session,
+            isFlippedHorizontally: isFlippedHorizontally,
+            isFlippedVertically: isFlippedVertically,
+            rotation: rotation
+        )
     }
 
     static func dismantleNSView(_ nsView: CameraPreviewNSView, coordinator: ()) {
@@ -27,43 +53,58 @@ struct CameraPreviewView: NSViewRepresentable {
     }
 }
 
-// Custom NSView to handle layout
 final class CameraPreviewNSView: NSView {
-    private let circleMask = CAShapeLayer()
-    private var previewLayer: AVCaptureVideoPreviewLayer?
+    private let previewLayer = AVCaptureVideoPreviewLayer()
+    private var previewTransform = CGAffineTransform.identity
 
-    func install(_ previewLayer: AVCaptureVideoPreviewLayer) {
-        guard self.previewLayer !== previewLayer else { return }
-
-        removePreviewLayer()
-        previewLayer.removeFromSuperlayer()
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
         previewLayer.videoGravity = .resizeAspectFill
         previewLayer.actions = [
             "bounds": NSNull(),
             "position": NSNull(),
-            "frame": NSNull(),
+            "transform": NSNull(),
         ]
         layer?.addSublayer(previewLayer)
-        self.previewLayer = previewLayer
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func update(
+        session: AVCaptureSession,
+        isFlippedHorizontally: Bool,
+        isFlippedVertically: Bool,
+        rotation: OverlayRotation
+    ) {
+        if previewLayer.session !== session {
+            previewLayer.session = session
+        }
+
+        previewTransform = CameraImageTransform.make(
+            isFlippedHorizontally: isFlippedHorizontally,
+            isFlippedVertically: isFlippedVertically,
+            rotation: rotation
+        )
         needsLayout = true
     }
 
     func removePreviewLayer() {
-        previewLayer?.removeFromSuperlayer()
-        previewLayer = nil
+        previewLayer.session = nil
+        previewLayer.removeFromSuperlayer()
     }
 
     override func layout() {
         super.layout()
 
-        previewLayer?.frame = bounds
-
-        // Apply a circular mask so the preview is always round,
-        // even during animated frame changes.
-        circleMask.frame = bounds
-        circleMask.path = CGPath(ellipseIn: bounds, transform: nil)
-        if layer?.mask !== circleMask {
-            layer?.mask = circleMask
-        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        previewLayer.bounds = CGRect(origin: .zero, size: bounds.size)
+        previewLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        previewLayer.setAffineTransform(previewTransform)
+        CATransaction.commit()
     }
 }

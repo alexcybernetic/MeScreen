@@ -1,21 +1,6 @@
 @preconcurrency import AVFoundation
 import AppKit
 import Combine
-import SwiftUI
-
-enum WindowSize: CGFloat, CaseIterable {
-    case small = 100
-    case medium = 150
-    case large = 200
-
-    var displayName: String {
-        switch self {
-        case .small: "Small"
-        case .medium: "Medium"
-        case .large: "Large"
-        }
-    }
-}
 
 nonisolated enum CameraAuthorization: Equatable, Sendable {
     case notDetermined
@@ -105,35 +90,18 @@ enum CameraDeviceChange: Equatable {
 }
 
 @MainActor
-protocol CameraTransitionScheduling {
-    func schedule(_ action: @escaping @MainActor @Sendable () -> Void)
-}
-
-@MainActor
-struct MainQueueCameraTransitionScheduler: CameraTransitionScheduling {
-    func schedule(_ action: @escaping @MainActor @Sendable () -> Void) {
-        DispatchQueue.main.asyncAfter(
-            deadline: .now() + 0.05,
-            execute: action
-        )
-    }
-}
-
-@MainActor
 final class CameraManager: NSObject, ObservableObject {
-    @Published private(set) var previewLayer: AVCaptureVideoPreviewLayer?
+    @Published private(set) var captureSession: AVCaptureSession?
     @Published private(set) var availableCameras: [CameraDescriptor] = []
     @Published private(set) var currentCamera: CameraDescriptor?
     @Published private(set) var cameraState: CameraState = .idle
-    @Published private(set) var windowSize: WindowSize = .medium
-    @Published private(set) var isTransitioning = false
 
     private let authorizationProvider: CameraAuthorizationProviding
     private let sessionController: CaptureSessionControlling
     private let notificationCenter: NotificationCenter
-    private let transitionScheduler: CameraTransitionScheduling
     private var activeSessionIdentifier: ObjectIdentifier?
     private var activeRequestID = UUID()
+    private var isCaptureRequested: Bool
     private var cameraOperation: Task<Void, Never>?
     private var discoveryOperation: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
@@ -142,14 +110,12 @@ final class CameraManager: NSObject, ObservableObject {
         startCamera: Bool = true,
         authorizationProvider: CameraAuthorizationProviding = SystemCameraAuthorizationProvider(),
         sessionController: CaptureSessionControlling = AVCaptureSessionController(),
-        notificationCenter: NotificationCenter = .default,
-        transitionScheduler: CameraTransitionScheduling? = nil
+        notificationCenter: NotificationCenter = .default
     ) {
         self.authorizationProvider = authorizationProvider
         self.sessionController = sessionController
         self.notificationCenter = notificationCenter
-        self.transitionScheduler = transitionScheduler
-            ?? MainQueueCameraTransitionScheduler()
+        isCaptureRequested = startCamera
         super.init()
 
         observeCameraEvents()
@@ -159,15 +125,18 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func checkPermissions() async {
+        guard !Task.isCancelled else { return }
+        isCaptureRequested = true
         cameraState = .checkingPermission
 
-        switch authorizationProvider.authorizationStatus() {
+        let authorizationStatus = authorizationProvider.authorizationStatus()
+        switch authorizationStatus {
         case .authorized:
             await startCamera(preferredCameraID: currentCamera?.id)
         case .notDetermined:
             cameraState = .requestingPermission
             let granted = await authorizationProvider.requestAccess()
-            guard !Task.isCancelled else { return }
+            guard isCaptureRequested, !Task.isCancelled else { return }
 
             if granted {
                 await startCamera(preferredCameraID: currentCamera?.id)
@@ -182,10 +151,12 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func switchCamera(to camera: CameraDescriptor) {
+        isCaptureRequested = true
         scheduleCameraStart(preferredCameraID: camera.id)
     }
 
     func stopCamera() {
+        isCaptureRequested = false
         cameraOperation?.cancel()
         discoveryOperation?.cancel()
         activeRequestID = UUID()
@@ -199,6 +170,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func refreshCameras() {
+        isCaptureRequested = true
         schedulePermissionCheck()
     }
 
@@ -207,23 +179,6 @@ final class CameraManager: NSObject, ObservableObject {
             string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera"
         ) else { return }
         NSWorkspace.shared.open(url)
-    }
-
-    func changeSize(to newSize: WindowSize) {
-        guard newSize != windowSize, !isTransitioning else { return }
-
-        isTransitioning = true
-        transitionScheduler.schedule {
-            self.windowSize = newSize
-        }
-    }
-
-    func finishTransition() {
-        transitionScheduler.schedule {
-            withAnimation(.easeOut(duration: 0.25)) {
-                self.isTransitioning = false
-            }
-        }
     }
 
     private func schedulePermissionCheck() {
@@ -243,33 +198,41 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func startCamera(preferredCameraID: String?) async {
+        guard isCaptureRequested, !Task.isCancelled else { return }
+
         let requestID = UUID()
         activeRequestID = requestID
         cameraState = .starting
-        previewLayer = nil
+        captureSession = nil
         currentCamera = nil
         activeSessionIdentifier = nil
 
         let outcome = await sessionController.start(
             preferredCameraID: preferredCameraID
         )
-        guard !Task.isCancelled, requestID == activeRequestID else { return }
+        let requestMatches = requestID == activeRequestID
+        guard isCaptureRequested,
+              !Task.isCancelled,
+              requestMatches else {
+            if case .running(let snapshot) = outcome {
+                await sessionController.stop(
+                    sessionIdentifier: snapshot.sessionIdentifier
+                )
+            }
+            return
+        }
 
         switch outcome {
         case .running(let snapshot):
             availableCameras = snapshot.cameras
             currentCamera = snapshot.selectedCamera
-            let previewLayer = AVCaptureVideoPreviewLayer(
-                session: snapshot.session
-            )
-            previewLayer.videoGravity = .resizeAspectFill
-            self.previewLayer = previewLayer
+            captureSession = snapshot.session
             activeSessionIdentifier = snapshot.sessionIdentifier
             cameraState = .running
         case .failed(let failure, let cameras):
             availableCameras = cameras
             currentCamera = nil
-            previewLayer = nil
+            captureSession = nil
             activeSessionIdentifier = nil
             cameraState = failure == .noCameras
                 ? .unavailable
@@ -278,7 +241,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func clearSessionUI(state: CameraState) {
-        previewLayer = nil
+        captureSession = nil
         currentCamera = nil
         activeSessionIdentifier = nil
         availableCameras = []
@@ -325,7 +288,8 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func handleDeviceChange(_ change: CameraDeviceChange) {
-        guard authorizationProvider.authorizationStatus() == .authorized else {
+        guard isCaptureRequested,
+              authorizationProvider.authorizationStatus() == .authorized else {
             return
         }
 
@@ -372,7 +336,7 @@ final class CameraManager: NSObject, ObservableObject {
         activeRequestID = UUID()
 
         let failedSessionIdentifier = activeSessionIdentifier
-        previewLayer = nil
+        captureSession = nil
         currentCamera = nil
         activeSessionIdentifier = nil
         cameraState = .failed(
@@ -385,4 +349,5 @@ final class CameraManager: NSObject, ObservableObject {
             )
         }
     }
+
 }

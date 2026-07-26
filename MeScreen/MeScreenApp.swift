@@ -5,8 +5,9 @@
 //  Created by Alex on 19.03.26.
 //
 
-import SwiftUI
+import AppKit
 import Combine
+import SwiftUI
 
 @main
 struct MeScreenApp: App {
@@ -16,16 +17,15 @@ struct MeScreenApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(appDelegate.cameraManager)
+                .environmentObject(appDelegate.settingsStore)
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
         .commands {
-            // Remove most menu items but keep Quit working
             CommandGroup(replacing: .newItem) { }
             CommandGroup(replacing: .saveItem) { }
             CommandGroup(replacing: .printItem) { }
 
-            // Ensure Quit works
             CommandGroup(replacing: .appTermination) {
                 Button("Quit MeScreen") {
                     NSApplication.shared.terminate(nil)
@@ -37,36 +37,50 @@ struct MeScreenApp: App {
 }
 
 @MainActor
-class AppDelegate: NSObject, NSApplicationDelegate {
-    var statusBarController: StatusBarController?
-    var window: NSWindow?
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private(set) var statusBarController: StatusBarController?
+    private(set) var window: NSWindow?
+
     let cameraManager = CameraManager(
-        startCamera: ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
+        startCamera: ProcessInfo.processInfo.environment[
+            "XCTestConfigurationFilePath"
+        ] == nil
     )
+    let settingsStore = OverlaySettingsStore()
+
+    private var customizationWindowController: CustomizationWindowController?
+    private var globalShortcutController: GlobalShortcutController?
+    private var isOverlayVisible = true
+    private var lastObservedSettings: OverlaySettings?
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Use the compiled bundle icon instead of looking for a loose PNG file.
         if let appIcon = NSImage(named: NSImage.applicationIconName) {
             NSApp.applicationIconImage = appIcon
         }
 
-        // Setup status bar first
-        statusBarController = StatusBarController(cameraManager: cameraManager)
+        statusBarController = StatusBarController(
+            cameraManager: cameraManager,
+            settingsStore: settingsStore,
+            customizeAction: { [weak self] in
+                self?.showCustomization()
+            },
+            toggleOverlayAction: { [weak self] in
+                self?.toggleOverlay()
+            }
+        )
         statusBarController?.setupStatusBar()
 
-        // Keep MeScreen out of the Dock; all controls live in the menu bar.
+        globalShortcutController = GlobalShortcutController { [weak self] in
+            self?.toggleOverlay()
+        }
+        globalShortcutController?.setEnabled(
+            settingsStore.settings.isGlobalShortcutEnabled
+        )
+
         NSApp.setActivationPolicy(.accessory)
+        observeSettings()
 
-        // Observe size changes and update window size
-        cameraManager.$windowSize
-            .sink { [weak self] _ in
-                self?.updateWindowSize()
-            }
-            .store(in: &cancellables)
-
-        // Try on the next run-loop pass. applicationDidUpdate provides a
-        // deterministic fallback until SwiftUI has installed its window.
         DispatchQueue.main.async { [weak self] in
             self?.configureWindow()
         }
@@ -78,64 +92,177 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        globalShortcutController?.invalidate()
         cameraManager.stopCamera()
     }
 
-    func configureWindow() {
+    private func observeSettings() {
+        lastObservedSettings = settingsStore.settings
+
+        settingsStore.$settings
+            .dropFirst()
+            .sink { [weak self] settings in
+                self?.applySettingsChange(settings)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func applySettingsChange(_ settings: OverlaySettings) {
+        let previousSettings = lastObservedSettings ?? settings
+        lastObservedSettings = settings
+
+        if settings.isGlobalShortcutEnabled
+            != previousSettings.isGlobalShortcutEnabled {
+            globalShortcutController?.setEnabled(
+                settings.isGlobalShortcutEnabled
+            )
+        }
+
+        let previousLayout = OverlayLayout(settings: previousSettings)
+        let layout = OverlayLayout(settings: settings)
+        if layout != previousLayout {
+            updateWindowLayout(
+                layout,
+                placement: .preserveCurrentEdges,
+                animated: true
+            )
+        }
+    }
+
+    private func configureWindow() {
         guard window == nil,
               let window = NSApplication.shared.windows.first(where: {
-                  $0.contentViewController != nil && !($0 is NSPanel)
+                  $0 !== customizationWindowController?.window
+                      && $0.contentViewController != nil
+                      && !($0 is NSPanel)
               }) else { return }
         self.window = window
 
-        // Make window float on top and draggable
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.isMovableByWindowBackground = true
-        window.backgroundColor = .clear  // Transparent background!
+        window.backgroundColor = .clear
         window.isOpaque = false
-        window.hasShadow = false  // Turn OFF window shadow - ContentView has its own
+        window.hasShadow = false
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.styleMask = [.borderless, .fullSizeContentView]
         window.ignoresMouseEvents = false
+        window.isExcludedFromWindowsMenu = true
 
-        // Set the content size based only on cameraManager.windowSize.rawValue
-        let contentSize = cameraManager.windowSize.rawValue
-        window.setContentSize(NSSize(width: contentSize, height: contentSize))
-
-        // Position in top-right corner
-        if let screen = NSScreen.main {
-            let screenFrame = screen.visibleFrame
-            let x = screenFrame.maxX - contentSize - 20
-            let y = screenFrame.maxY - contentSize - 20
-            window.setFrameOrigin(NSPoint(x: x, y: y))
-        }
+        let layout = OverlayLayout(settings: settingsStore.settings)
+        window.setContentSize(layout.contentSize)
+        positionWindowAtStartingCorner(animated: false)
     }
 
-    func updateWindowSize() {
+    private func updateWindowLayout(
+        _ layout: OverlayLayout,
+        placement: WindowPlacement,
+        animated: Bool
+    ) {
         guard let window else {
-            // Do not leave the preview hidden if a size command arrives before
-            // SwiftUI has finished creating the window.
-            if cameraManager.isTransitioning {
-                cameraManager.finishTransition()
-            }
+            settingsStore.finishTransition()
             return
         }
 
-        let contentSize = cameraManager.windowSize.rawValue
+        let visibleFrame = (window.screen ?? NSScreen.main)?.visibleFrame
+            ?? window.frame
+        let origin = switch placement {
+        case .startingCorner(let corner):
+            corner.origin(
+                for: layout.contentSize,
+                in: visibleFrame
+            )
+        case .preserveCurrentEdges:
+            resizedOrigin(
+                from: window.frame,
+                to: layout.contentSize,
+                in: visibleFrame
+            )
+        }
+        let frame = CGRect(origin: origin, size: layout.contentSize)
 
-        // Animate the size change (0.45s for a smooth, unhurried resize)
+        guard animated else {
+            window.setFrame(frame, display: true)
+            settingsStore.finishTransition()
+            return
+        }
+
         NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.45
+            context.duration = 0.28
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            window.animator().setContentSize(NSSize(width: contentSize, height: contentSize))
+            window.animator().setFrame(frame, display: true)
         }, completionHandler: { [weak self] in
-            // NSAnimationContext does not annotate this callback as main-actor
-            // isolated, even though AppKit invokes it on the main thread.
             Task { @MainActor [weak self] in
-                self?.cameraManager.finishTransition()
+                self?.settingsStore.finishTransition()
             }
         })
+    }
+
+    private func positionWindowAtStartingCorner(animated: Bool) {
+        let layout = OverlayLayout(settings: settingsStore.settings)
+        updateWindowLayout(
+            layout,
+            placement: .startingCorner(settingsStore.settings.startingCorner),
+            animated: animated
+        )
+    }
+
+    private func resizedOrigin(
+        from currentFrame: CGRect,
+        to contentSize: CGSize,
+        in visibleFrame: CGRect
+    ) -> CGPoint {
+        let proposedX = currentFrame.midX <= visibleFrame.midX
+            ? currentFrame.minX
+            : currentFrame.maxX - contentSize.width
+        let proposedY = currentFrame.midY <= visibleFrame.midY
+            ? currentFrame.minY
+            : currentFrame.maxY - contentSize.height
+
+        return CGPoint(
+            x: proposedX.clamped(
+                to: visibleFrame.minX...(visibleFrame.maxX - contentSize.width)
+            ),
+            y: proposedY.clamped(
+                to: visibleFrame.minY...(visibleFrame.maxY - contentSize.height)
+            )
+        )
+    }
+
+    private func showCustomization() {
+        if customizationWindowController == nil {
+            customizationWindowController = CustomizationWindowController(
+                settingsStore: settingsStore
+            )
+        }
+        customizationWindowController?.show()
+    }
+
+    private func toggleOverlay() {
+        guard let window else { return }
+
+        if isOverlayVisible {
+            window.orderOut(nil)
+            cameraManager.stopCamera()
+            isOverlayVisible = false
+        } else {
+            window.orderFrontRegardless()
+            cameraManager.refreshCameras()
+            isOverlayVisible = true
+        }
+
+        statusBarController?.setOverlayVisible(isOverlayVisible)
+    }
+}
+
+private enum WindowPlacement {
+    case startingCorner(OverlayCorner)
+    case preserveCurrentEdges
+}
+
+private extension Comparable {
+    func clamped(to range: ClosedRange<Self>) -> Self {
+        min(max(self, range.lowerBound), range.upperBound)
     }
 }
