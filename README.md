@@ -6,7 +6,7 @@
 
 <p align="center">A floating camera overlay for macOS.</p>
 
-![MeScreen camera overlay and menu](Media/MeScreenScreenshot.png)
+![MeScreen camera overlay and menu](Media/MeScreenShot.png)
 
 MeScreen puts your camera in a small, draggable overlay above other windows. It lives in the menu bar and stays out of the Dock.
 
